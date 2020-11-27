@@ -9,17 +9,18 @@
 
 #include "geriatrix.h"
 
-#ifdef NEED_POSIX_FALLOCATE
+// #ifdef NEED_POSIX_FALLOCATE
 /*
  * fake posix_fallocate by ftruncating the file larger and touching
  * a byte in each block.... returns 0 on success, errno on fail(!!!)
  * (this is at the top of the file so it can be included in the
  * posix driver if needed...)
  */
-static int posix_fallocate(int fd, off_t offset, off_t len) {
+static int custom_fallocate(int fd, off_t offset, off_t len) {
     struct stat st;
     off_t newlen, curoff, lastoff, ptr;
     ssize_t rv;
+    void *buf;
 
     newlen = offset + len;
 
@@ -29,25 +30,35 @@ static int posix_fallocate(int fd, off_t offset, off_t len) {
     if (st.st_size > newlen)        /* not growing it, assume ok */
         return(0);
 
-    if (ftruncate(fd, newlen) < 0)   /* grow it */
+    buf = calloc(1, st.st_blksize);
+    if (buf == NULL)
         return(errno);
 
     curoff = ((st.st_size + (st.st_blksize-1)) / st.st_blksize) * st.st_blksize;
     lastoff = ((newlen + (st.st_blksize-1)) / st.st_blksize) * st.st_blksize;
 
-    for (ptr = curoff ; ptr < lastoff ; ptr += st.st_blksize) {
-        if (lseek(fd, ptr, SEEK_SET) < 0)
-            return(errno);
-        rv = write(fd, "", 1);    /* writes a null */
-        if (rv < 0)
-            return(errno);
-        if (rv == 0)
-            return(EIO);
+    if (lseek(fd, curoff, SEEK_SET) == (off_t) -1)
+    {
+        free(buf);
+        return(errno);
     }
 
+    for (ptr = curoff ; ptr < lastoff ; ptr += st.st_blksize) {
+        rv = write(fd, buf, st.st_blksize);    /* writes null */
+        if (rv < 0) {
+            free(buf);
+            return(errno);
+        }
+        if (rv == 0) {
+            free(buf);
+            return(EIO);
+        }
+    }
+
+    free(buf);
     return(0);
 }
-#endif
+// #endif
 
 /*
  * backend configuration -- all filesystem aging I/O is routed here!
@@ -55,7 +66,7 @@ static int posix_fallocate(int fd, off_t offset, off_t len) {
 
 /* posix driver (the default) */
 static struct backend_driver posix_backend_driver = {
-    open, close, write, access, unlink, mkdir, posix_fallocate, stat, chmod,
+    open, close, write, access, unlink, mkdir, custom_fallocate, stat, chmod,
 };
 
 #ifdef DELTAFS     /* optional backend for cmu's deltafs */
